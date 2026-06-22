@@ -431,7 +431,10 @@ fn is_grapheme_ideographic(text: &str) -> bool {
 }
 
 fn is_grapheme_whitespace(text: &str) -> bool {
-    text.chars().any(|x| x.is_whitespace())
+    // Only ASCII whitespace is a word-break opportunity. Non-ASCII Unicode spaces
+    // (e.g. thin space U+2009) stay attached to adjacent words and are never
+    // replaced with newlines during rewrap.
+    text.chars().any(|x| x.is_ascii_whitespace() && x != '\n')
 }
 
 fn should_stay_with_preceding_ideograph(text: &str) -> bool {
@@ -777,6 +780,19 @@ mod tests {
                 false,
             ),
             format!("foo{}bar", '\u{2009}')
+        );
+        // Thin space must not be used as a line-break point even when the line
+        // exceeds the wrap column; only ASCII spaces are breakable.
+        assert_eq!(
+            wrap_with_prefix(
+                String::new(),
+                String::new(),
+                format!("foo{}bar baz", '\u{2009}'),
+                5,
+                NonZeroU32::new(4).unwrap(),
+                false,
+            ),
+            format!("foo{}bar\nbaz", '\u{2009}')
         );
     }
 }
