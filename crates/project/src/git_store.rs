@@ -5964,8 +5964,10 @@ impl Repository {
             else {
                 return;
             };
-            git_store.active_repo_id = Some(id);
-            cx.emit(GitStoreEvent::ActiveRepositoryChanged(Some(id)));
+            if git_store.active_repo_id != Some(id) {
+                git_store.active_repo_id = Some(id);
+                cx.emit(GitStoreEvent::ActiveRepositoryChanged(Some(id)));
+            }
         });
     }
 

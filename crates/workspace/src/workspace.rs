@@ -6159,11 +6159,25 @@ impl Workspace {
             project.set_active_path(active_entry.clone(), cx)
         });
 
-        if focus_changed && let Some(project_path) = &active_entry {
-            let git_store_entity = self.project.read(cx).git_store().clone();
-            git_store_entity.update(cx, |git_store, cx| {
-                git_store.set_active_repo_for_path(project_path, cx);
-            });
+        if focus_changed {
+            // Prefer the repository the item itself is scoped to: repo-scoped
+            // views like the project diff refresh their contents
+            // asynchronously, so resolving a repository from their active
+            // project path can see a stale path from the previously displayed
+            // repository and switch the active repository back.
+            if let Some(repository) = self
+                .active_item(cx)
+                .and_then(|item| item.active_repository(cx))
+            {
+                repository.update(cx, |repository, cx| {
+                    repository.set_as_active_repository(cx);
+                });
+            } else if let Some(project_path) = &active_entry {
+                let git_store_entity = self.project.read(cx).git_store().clone();
+                git_store_entity.update(cx, |git_store, cx| {
+                    git_store.set_active_repo_for_path(project_path, cx);
+                });
+            }
         }
 
         self.update_window_title(window, cx);

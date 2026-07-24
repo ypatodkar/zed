@@ -20,7 +20,7 @@ use multi_buffer::MultiBuffer;
 use project::{
     Project, ProjectPath,
     git_store::{
-        Repository,
+        GitStoreEvent, Repository,
         diff_buffer_list::{self, DiffBase},
     },
 };
@@ -63,6 +63,7 @@ pub struct ProjectDiff {
     workspace: WeakEntity<Workspace>,
     diff: Entity<DiffMultibuffer>,
     _diff_observation: Subscription,
+    _git_store_subscription: Subscription,
 }
 
 impl ProjectDiff {
@@ -238,11 +239,27 @@ impl ProjectDiff {
         cx: &mut Context<Self>,
     ) -> Self {
         let observation = cx.observe(&diff, |_, _, cx| cx.notify());
+        // This view shows the uncommitted changes of the active repository, so
+        // retarget it when the user selects another repository while it's
+        // open. Otherwise it keeps showing the old repository's changes, and
+        // focusing it would revert the user's selection (issue #61530).
+        let git_store_subscription = cx.subscribe(
+            &project.read(cx).git_store().clone(),
+            |this, git_store, event, cx| {
+                if matches!(event, GitStoreEvent::ActiveRepositoryChanged(_)) {
+                    let active_repository = git_store.read(cx).active_repository();
+                    if active_repository.is_some() {
+                        this.set_repo(active_repository, cx);
+                    }
+                }
+            },
+        );
         Self {
             project,
             workspace: workspace.downgrade(),
             diff,
             _diff_observation: observation,
+            _git_store_subscription: git_store_subscription,
         }
     }
 
@@ -384,6 +401,10 @@ impl Item for ProjectDiff {
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
         Some(Icon::new(IconName::GitBranch).color(Color::Muted))
+    }
+
+    fn active_repository(&self, cx: &App) -> Option<Entity<Repository>> {
+        self.repo(cx)
     }
 
     fn to_item_events(event: &EditorEvent, f: &mut dyn FnMut(ItemEvent)) {
@@ -1222,6 +1243,135 @@ mod tests {
         let paths_b = diff_item.read_with(cx, |diff, cx| diff.excerpt_paths(cx));
         assert_eq!(paths_b.len(), 1);
         assert_eq!(*paths_b[0], *"b.txt");
+    }
+
+    // Regression test for https://github.com/zed-industries/zed/issues/61530:
+    // selecting a repository and then clicking one of its changed files in the
+    // git panel used to revert the active repository to the previously
+    // selected one. Clicking the entry deploys/focuses the existing
+    // ProjectDiff, whose excerpts still belong to the old repository (they
+    // refresh asynchronously), so the focus-driven repository sync in
+    // `Workspace::active_item_path_changed` resolved the stale cursor path to
+    // the old repository and switched back.
+    #[gpui::test]
+    async fn test_deploy_at_after_switching_repos_keeps_active_repository(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project_a"),
+            json!({
+                ".git": {},
+                "a.txt": "CHANGED_A\n",
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            path!("/project_b"),
+            json!({
+                ".git": {},
+                "b.txt": "CHANGED_B\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project_a/.git")),
+            &[("a.txt", "original_a\n".to_string())],
+        );
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project_b/.git")),
+            &[("b.txt", "original_b\n".to_string())],
+        );
+
+        let project = Project::test(
+            fs.clone(),
+            [
+                Path::new(path!("/project_a")),
+                Path::new(path!("/project_b")),
+            ],
+            cx,
+        )
+        .await;
+
+        let (worktree_a_id, worktree_b_id) = project.read_with(cx, |project, cx| {
+            let mut worktrees: Vec<_> = project.worktrees(cx).collect();
+            worktrees.sort_by_key(|w| w.read(cx).abs_path());
+            (worktrees[0].read(cx).id(), worktrees[1].read(cx).id())
+        });
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        cx.run_until_parked();
+
+        let active_repo_root = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .project()
+                    .read(cx)
+                    .active_repository(cx)
+                    .map(|repo| repo.read(cx).work_directory_abs_path.clone())
+            })
+        };
+
+        // Open the diff while repository A is active; it shows a.txt and takes
+        // focus, leaving the cursor in an excerpt of a repo-A file.
+        workspace.update(cx, |workspace, cx| {
+            let git_store = workspace.project().read(cx).git_store().clone();
+            git_store.update(cx, |git_store, cx| {
+                git_store.set_active_repo_for_worktree(worktree_a_id, cx);
+            });
+        });
+        cx.focus(&workspace);
+        cx.update(|window, cx| {
+            window.dispatch_action(project_diff::Diff.boxed_clone(), cx);
+        });
+        cx.run_until_parked();
+
+        // The user switches the repository selector to repository B.
+        workspace.update(cx, |workspace, cx| {
+            let git_store = workspace.project().read(cx).git_store().clone();
+            git_store.update(cx, |git_store, cx| {
+                git_store.set_active_repo_for_worktree(worktree_b_id, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            active_repo_root(cx).as_deref(),
+            Some(Path::new(path!("/project_b"))),
+            "repository B should be active after selecting it"
+        );
+
+        // The user clicks b.txt in the git panel, which deploys the existing
+        // ProjectDiff at that entry (see GitPanel::open_diff).
+        let entry_b = crate::git_panel::GitStatusEntry {
+            repo_path: git::repository::repo_path("b.txt"),
+            status: git::status::StatusCode::Modified.worktree(),
+            staging: git::status::StageStatus::Unstaged,
+            diff_stat: None,
+        };
+        workspace.update_in(cx, |workspace, window, cx| {
+            ProjectDiff::deploy_at(workspace, Some(entry_b), window, cx);
+        });
+        cx.run_until_parked();
+
+        let diff_item = workspace.update(cx, |workspace, cx| {
+            workspace.active_item_as::<ProjectDiff>(cx).unwrap()
+        });
+        let paths = diff_item.read_with(cx, |diff, cx| diff.excerpt_paths(cx));
+        assert_eq!(paths.len(), 1);
+        assert_eq!(
+            *paths[0], *"b.txt",
+            "the diff should show the clicked repository-B entry"
+        );
+
+        assert_eq!(
+            active_repo_root(cx).as_deref(),
+            Some(Path::new(path!("/project_b"))),
+            "repository B should remain active after clicking its own changed file"
+        );
     }
 
     #[gpui::test]

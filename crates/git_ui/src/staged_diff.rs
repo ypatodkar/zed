@@ -16,7 +16,10 @@ use gpui::{
 use language::Capability;
 use project::{
     Project, ProjectPath,
-    git_store::diff_buffer_list::{DiffBase, DiffBufferList},
+    git_store::{
+        GitStoreEvent, Repository,
+        diff_buffer_list::{DiffBase, DiffBufferList},
+    },
     project_settings::ProjectSettings,
 };
 use settings::Settings;
@@ -139,6 +142,7 @@ pub struct StagedDiff {
     project: Entity<Project>,
     workspace: WeakEntity<Workspace>,
     _diff_event_subscription: Subscription,
+    _git_store_subscription: Subscription,
 }
 
 impl StagedDiff {
@@ -254,12 +258,29 @@ impl StagedDiff {
         let diff_event_subscription = cx.subscribe(&diff, |_, _, event: &EditorEvent, cx| {
             cx.emit(event.clone())
         });
+        // This view shows the staged changes of the active repository, so
+        // retarget it when the user selects another repository while it's
+        // open. Otherwise it keeps showing the old repository's changes, and
+        // focusing it would revert the user's selection (issue #61530).
+        let git_store_subscription = cx.subscribe(
+            &project.read(cx).git_store().clone(),
+            |this: &mut Self, git_store, event, cx| {
+                if matches!(event, GitStoreEvent::ActiveRepositoryChanged(_)) {
+                    let active_repository = git_store.read(cx).active_repository();
+                    if active_repository.is_some() {
+                        this.diff
+                            .update(cx, |diff, cx| diff.set_repo(active_repository, cx));
+                    }
+                }
+            },
+        );
 
         Self {
             diff,
             project,
             workspace: workspace.downgrade(),
             _diff_event_subscription: diff_event_subscription,
+            _git_store_subscription: git_store_subscription,
         }
     }
 
@@ -323,6 +344,10 @@ impl Item for StagedDiff {
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
         Some(Icon::new(IconName::GitBranch).color(Color::Muted))
+    }
+
+    fn active_repository(&self, cx: &App) -> Option<Entity<Repository>> {
+        self.diff.read(cx).repo(cx)
     }
 
     fn to_item_events(event: &EditorEvent, f: &mut dyn FnMut(ItemEvent)) {

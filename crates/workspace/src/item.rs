@@ -17,7 +17,7 @@ use gpui::{
 };
 use language::Capability;
 pub use language::HighlightedText;
-use project::{Project, ProjectEntryId, ProjectPath};
+use project::{Project, ProjectEntryId, ProjectPath, git_store::Repository};
 pub use settings::{
     ActivateOnClose, ClosePosition, RegisterSetting, Settings, SettingsLocation, ShowCloseButton,
     ShowDiagnostics,
@@ -348,6 +348,18 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
         None
     }
 
+    /// The repository this item's content is scoped to, if any.
+    ///
+    /// When the focused item reports a repository, the workspace activates it
+    /// directly instead of resolving one from the item's active project path.
+    /// Repo-scoped views like the project diff refresh their contents
+    /// asynchronously after switching repositories, so path-based resolution
+    /// can observe a stale path from the previously displayed repository and
+    /// switch the active repository back (see issue #61530).
+    fn active_repository(&self, _cx: &App) -> Option<Entity<Repository>> {
+        None
+    }
+
     /// Returns optional elements to render to the left of the breadcrumb.
     fn breadcrumb_prefix(
         &self,
@@ -564,6 +576,7 @@ pub trait ItemHandle: 'static + Send {
     fn to_searchable_item_handle(&self, cx: &App) -> Option<Box<dyn SearchableItemHandle>>;
     fn breadcrumb_location(&self, cx: &App) -> ToolbarItemLocation;
     fn breadcrumbs(&self, cx: &App) -> Option<(Vec<HighlightedText>, Option<Font>)>;
+    fn active_repository(&self, cx: &App) -> Option<Entity<Repository>>;
     fn breadcrumb_prefix(&self, window: &mut Window, cx: &mut App) -> Option<gpui::AnyElement>;
     fn show_toolbar(&self, cx: &App) -> bool;
     fn pixel_position_of_cursor(&self, cx: &App) -> Option<Point<Pixels>>;
@@ -1121,6 +1134,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn breadcrumbs(&self, cx: &App) -> Option<(Vec<HighlightedText>, Option<Font>)> {
         self.read(cx).breadcrumbs(cx)
+    }
+
+    fn active_repository(&self, cx: &App) -> Option<Entity<Repository>> {
+        self.read(cx).active_repository(cx)
     }
 
     fn breadcrumb_prefix(&self, window: &mut Window, cx: &mut App) -> Option<gpui::AnyElement> {
