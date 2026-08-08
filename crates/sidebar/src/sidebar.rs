@@ -404,6 +404,12 @@ enum ListEntry {
     Terminal(TerminalEntry),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HoveredEntry {
+    Thread(ThreadId),
+    Terminal(TerminalId),
+}
+
 #[derive(Clone)]
 enum ActivatableEntry {
     Thread {
@@ -779,7 +785,10 @@ pub struct Sidebar {
     selection: Option<usize>,
     /// Tracks which sidebar entry is currently active (highlighted).
     active_entry: Option<ActiveEntry>,
-    hovered_thread_index: Option<usize>,
+    /// Identified by thread/terminal id rather than list index, because
+    /// archiving an entry shifts every entry below it up by one and would
+    /// otherwise leave this pointing at a different row than the cursor is over.
+    hovered_entry: Option<HoveredEntry>,
     renaming_thread_id: Option<ThreadId>,
     /// Threads in the database-backed regeneration path need their own loading
     /// state because they do not have a live `agent::Thread` to report it.
@@ -930,7 +939,7 @@ impl Sidebar {
             contents: SidebarContents::default(),
             selection: None,
             active_entry: None,
-            hovered_thread_index: None,
+            hovered_entry: None,
             renaming_thread_id: None,
             regenerating_titles: HashSet::new(),
             suppress_next_rename_edit: false,
@@ -2250,7 +2259,7 @@ impl Sidebar {
             }
             ListEntry::Thread(thread) => self.render_thread(ix, thread, is_active, is_selected, cx),
             ListEntry::Terminal(terminal) => {
-                self.render_terminal(ix, terminal, is_active, is_selected, cx)
+                self.render_terminal(terminal, is_active, is_selected, cx)
             }
         };
 
@@ -6292,7 +6301,8 @@ impl Sidebar {
         let metadata = thread.metadata.clone();
         let thread_workspace = thread.workspace.clone();
 
-        let is_hovered = self.hovered_thread_index == Some(ix);
+        let hovered_entry = HoveredEntry::Thread(thread.metadata.thread_id);
+        let is_hovered = self.hovered_entry == Some(hovered_entry);
         let is_selected = is_active;
         let is_draft = thread.draft.is_some();
         let is_empty_draft = thread.draft == Some(DraftKind::Empty);
@@ -6307,7 +6317,10 @@ impl Sidebar {
         let focus_handle = self.focus_handle.clone();
         let title_editor = self.thread_rename_editor.clone();
 
-        let id = SharedString::from(format!("thread-entry-{}", ix));
+        let id = SharedString::from(format!(
+            "thread-entry-{}",
+            thread.metadata.thread_id.to_key_string()
+        ));
 
         let color = cx.theme().colors();
         let sidebar_bg = color
@@ -6365,9 +6378,9 @@ impl Sidebar {
             .hovered(is_hovered)
             .on_hover(cx.listener(move |this, is_hovered: &bool, _window, cx| {
                 if *is_hovered {
-                    this.hovered_thread_index = Some(ix);
-                } else if this.hovered_thread_index == Some(ix) {
-                    this.hovered_thread_index = None;
+                    this.hovered_entry = Some(hovered_entry);
+                } else if this.hovered_entry == Some(hovered_entry) {
+                    this.hovered_entry = None;
                 }
                 cx.notify();
             }))
@@ -6642,7 +6655,6 @@ impl Sidebar {
 
     fn render_terminal(
         &self,
-        ix: usize,
         terminal: &TerminalEntry,
         is_active: bool,
         is_focused: bool,
@@ -6650,7 +6662,8 @@ impl Sidebar {
     ) -> AnyElement {
         let id = ElementId::from(format!("terminal-{}", terminal.metadata.terminal_id));
         let timestamp = format_history_entry_timestamp(terminal.metadata.created_at);
-        let is_hovered = self.hovered_thread_index == Some(ix);
+        let hovered_entry = HoveredEntry::Terminal(terminal.metadata.terminal_id);
+        let is_hovered = self.hovered_entry == Some(hovered_entry);
         let color = cx.theme().colors();
         let sidebar_bg = color
             .title_bar_background
@@ -6685,9 +6698,9 @@ impl Sidebar {
             .hovered(is_hovered)
             .on_hover(cx.listener(move |this, is_hovered: &bool, _window, cx| {
                 if *is_hovered {
-                    this.hovered_thread_index = Some(ix);
-                } else if this.hovered_thread_index == Some(ix) {
-                    this.hovered_thread_index = None;
+                    this.hovered_entry = Some(hovered_entry);
+                } else if this.hovered_entry == Some(hovered_entry) {
+                    this.hovered_entry = None;
                 }
                 cx.notify();
             }))
